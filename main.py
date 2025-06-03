@@ -172,80 +172,84 @@ def transform_data(raw_data):
     
     return transformed_data
 
-def send_to_api(data, api_url, api_key=None):
+def preview_data(data, max_rows=10):
     """
-    將數據傳送到指定的 API
+    預覽和檢視 CSV 資料
     
     Args:
-        data: 要傳送的數據
-        api_url: API 端點 URL
-        api_key: API 金鑰（如果需要）
-        
-    Returns:
-        API 回應結果
+        data: 解析後的資料
+        max_rows: 最多顯示幾行資料
+    """
+    print("\n" + "="*80)
+    print("📊 CSV 資料預覽")
+    print("="*80)
+    
+    if not data:
+        print("❌ 沒有資料可以顯示")
+        return
+    
+    # 顯示基本資訊
+    print(f"📋 總共有 {len(data)} 筆資料")
+    
+    # 顯示欄位名稱
+    if data:
+        columns = list(data[0].keys())
+        print(f"📄 欄位名稱 ({len(columns)} 個欄位):")
+        for i, col in enumerate(columns, 1):
+            print(f"   {i}. {col}")
+    
+    print("\n" + "-"*80)
+    print(f"📖 前 {min(max_rows, len(data))} 筆資料內容:")
+    print("-"*80)
+    
+    # 顯示前幾筆資料
+    for i, row in enumerate(data[:max_rows], 1):
+        print(f"\n📝 第 {i} 筆資料:")
+        for key, value in row.items():
+            # 限制顯示長度，避免過長的內容
+            display_value = str(value)[:100] + "..." if len(str(value)) > 100 else str(value)
+            print(f"   {key}: {display_value}")
+    
+    if len(data) > max_rows:
+        print(f"\n... (還有 {len(data) - max_rows} 筆資料未顯示)")
+    
+    print("\n" + "="*80)
+    print("✅ 資料預覽完成！")
+    print("="*80)
+
+def save_data_to_json(data, filename="csv_data_preview.json"):
+    """
+    將資料儲存為 JSON 檔案以便檢視
+    
+    Args:
+        data: 要儲存的資料
+        filename: 檔案名稱
     """
     try:
-        headers = {
-            "Content-Type": "application/json",
-            "User-Agent": "CSV-Auto-Upload/1.0"
-        }
-        
-        # 如果有 API 金鑰，添加到 headers
-        if api_key:
-            headers["Authorization"] = f"Bearer {api_key}"
-            # 或者根據 API 要求使用其他格式
-            # headers["X-API-Key"] = api_key
-        
-        # 準備要傳送的數據
-        payload = {
-            "data": data,
-            "timestamp": time.time(),
-            "source": "automated_csv_upload"
-        }
-        
-        print(f"正在傳送數據到 API: {api_url}")
-        print(f"數據量: {len(data)} 筆記錄")
-        
-        # 傳送 POST 請求
-        response = requests.post(
-            api_url,
-            headers=headers,
-            json=payload,
-            timeout=30
-        )
-        
-        # 檢查回應狀態
-        if response.status_code == 200:
-            print("✅ 數據傳送成功！")
-            print(f"API 回應: {response.json()}")
-            return True
-        else:
-            print(f"❌ API 回應錯誤: {response.status_code}")
-            print(f"錯誤內容: {response.text}")
-            return False
-            
-    except requests.exceptions.Timeout:
-        print("❌ API 請求超時")
-        return False
-    except requests.exceptions.ConnectionError:
-        print("❌ 無法連接到 API")
-        return False
+        import json
+        with open(filename, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        print(f"💾 資料已儲存到 {filename}")
+        print(f"📁 你可以下載這個檔案來檢視完整資料")
+        return True
     except Exception as e:
-        print(f"❌ 傳送數據時發生錯誤: {e}")
+        print(f"❌ 儲存檔案失敗: {e}")
         return False
 
 def main():
-    """主要執行函數"""
-    # 配置參數 - 根據你的實際需求修改
-    WEBSITE_URL = "https://your-target-website.com/download-page"  # 目標網站
-    DOWNLOAD_BUTTON_SELECTOR = "#download-csv-btn"  # 下載按鈕的 CSS 選擇器
-    API_URL = "https://your-api-endpoint.com/upload"  # 你的 API 端點
-    API_KEY = os.getenv("API_KEY")  # 從環境變數獲取 API 金鑰
+    """主要執行函數 - 簡化版本，只測試 CSV 下載和資料檢視"""
+    # 配置參數 - 台南市水利局抽水站資料查詢
+    WEBSITE_URL = "https://wrbpu.tainan.gov.tw/TainanPumpWeb/PumpInfo/PumpQuantityReport_AlonePage.aspx"  # 台南市抽水站資料
+    DOWNLOAD_BUTTON_SELECTOR = "#QueryButton"  # 查詢按鈕選擇器
+    
+    # 暫時註解掉 API 相關設定，先專注在資料擷取
+    # API_URL = "https://your-api-endpoint.com/upload"  # 你的 API 端點
+    # API_KEY = os.getenv("API_KEY")  # 從環境變數獲取 API 金鑰
     
     driver = None
     
     try:
-        print("🚀 開始執行自動化流程...")
+        print("🚀 開始執行 CSV 資料擷取測試...")
         
         # 步驟 1: 設定瀏覽器
         driver = setup_driver()
@@ -268,21 +272,35 @@ def main():
             print("❌ CSV 數據解析失敗")
             return
         
-        # 步驟 5: 轉換數據格式
+        # 步驟 5: 預覽資料內容
+        preview_data(raw_data, max_rows=5)  # 只顯示前5筆資料
+        
+        # 步驟 6: 儲存資料為 JSON 檔案供檢視
+        save_data_to_json(raw_data)
+        
+        # 步驟 7: 轉換數據格式（暫時只顯示，不傳送 API）
         transformed_data = transform_data(raw_data)
+        print(f"\n🔄 資料轉換完成，共 {len(transformed_data)} 筆轉換後的資料")
         
-        # 步驟 6: 傳送到 API
-        api_success = send_to_api(transformed_data, API_URL, API_KEY)
+        # 預覽轉換後的資料
+        print("\n📋 轉換後資料預覽:")
+        if transformed_data:
+            print("轉換後的第一筆資料格式:")
+            for key, value in transformed_data[0].items():
+                print(f"   {key}: {value}")
         
-        if api_success:
-            print("🎉 整個流程執行成功！")
-        else:
-            print("❌ API 傳送失敗")
+        # 暫時註解掉 API 傳送，等確認資料正確後再啟用
+        # 步驟 8: 傳送到 API (暫時跳過)
+        # api_success = send_to_api(transformed_data, API_URL, API_KEY)
+        
+        print("\n🎉 CSV 資料擷取測試完成！")
+        print("📋 請檢查上方的資料預覽，確認是否符合預期")
+        print("📁 完整資料已儲存為 csv_data_preview.json 檔案")
         
         # 清理下載的文件（可選）
-        if os.path.exists(csv_file_path):
-            os.remove(csv_file_path)
-            print("🗑️ 已清理臨時文件")
+        # if os.path.exists(csv_file_path):
+        #     os.remove(csv_file_path)
+        #     print("🗑️ 已清理臨時文件")
             
     except Exception as e:
         print(f"❌ 主程式執行錯誤: {e}")

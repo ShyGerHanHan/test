@@ -63,6 +63,22 @@
         font-size: 14px;
         color: #93c5fd;
       }
+
+      .controls {
+        display: flex;
+        gap: 16px;
+        margin-top: 12px;
+        flex-wrap: wrap;
+      }
+
+      .controls label {
+        font-size: 13px;
+        color: #d1d5db;
+      }
+
+      .controls input {
+        vertical-align: middle;
+      }
     </style>
   </head>
   <body>
@@ -72,6 +88,18 @@
       <div class="stage">
         <video id="video" autoplay playsinline muted></video>
         <canvas id="overlay"></canvas>
+      </div>
+      <div class="controls">
+        <label>
+          食指伸直門檻
+          <input id="extendedThreshold" type="range" min="0" max="0.25" step="0.01" value="0.06" />
+          <span id="extendedThresholdValue">0.06</span>
+        </label>
+        <label>
+          其他手指彎曲門檻
+          <input id="curledThreshold" type="range" min="0" max="0.25" step="0.01" value="0.02" />
+          <span id="curledThresholdValue">0.02</span>
+        </label>
       </div>
       <div id="status" class="status">初始化中...</div>
     </div>
@@ -85,7 +113,26 @@
       const video = document.getElementById("video");
       const canvas = document.getElementById("overlay");
       const statusEl = document.getElementById("status");
+      const extendedThresholdInput = document.getElementById("extendedThreshold");
+      const curledThresholdInput = document.getElementById("curledThreshold");
+      const extendedThresholdValue = document.getElementById("extendedThresholdValue");
+      const curledThresholdValue = document.getElementById("curledThresholdValue");
       const ctx = canvas.getContext("2d");
+
+      const params = {
+        extendedThreshold: Number(extendedThresholdInput.value),
+        curledThreshold: Number(curledThresholdInput.value),
+      };
+
+      extendedThresholdInput.addEventListener("input", () => {
+        params.extendedThreshold = Number(extendedThresholdInput.value);
+        extendedThresholdValue.textContent = params.extendedThreshold.toFixed(2);
+      });
+
+      curledThresholdInput.addEventListener("input", () => {
+        params.curledThreshold = Number(curledThresholdInput.value);
+        curledThresholdValue.textContent = params.curledThreshold.toFixed(2);
+      });
 
       function setStatus(text) {
         statusEl.textContent = text;
@@ -113,26 +160,82 @@
         ctx.stroke();
       }
 
-      function isFingerExtended(hand, mcp, pip, tip) {
+      function isFingerExtended(hand, mcp, pip, tip, threshold) {
         const mcpY = hand[mcp].y;
         const pipY = hand[pip].y;
         const tipY = hand[tip].y;
-        return tipY < pipY && pipY < mcpY;
+        return (mcpY - tipY) > threshold && tipY < pipY && pipY < mcpY;
       }
 
-      function isFingerCurled(hand, mcp, pip, tip) {
+      function isFingerCurled(hand, mcp, pip, tip, threshold) {
         const mcpY = hand[mcp].y;
         const pipY = hand[pip].y;
         const tipY = hand[tip].y;
-        return tipY > pipY || pipY > mcpY;
+        return (tipY - mcpY) > threshold || tipY > pipY || pipY > mcpY;
       }
 
-      function isGestureOne(hand) {
-        const indexExtended = isFingerExtended(hand, 5, 6, 8);
-        const middleCurled = isFingerCurled(hand, 9, 10, 12);
-        const ringCurled = isFingerCurled(hand, 13, 14, 16);
-        const pinkyCurled = isFingerCurled(hand, 17, 18, 20);
-        return indexExtended && middleCurled && ringCurled && pinkyCurled;
+      function getGestureOneDebug(hand, thresholdConfig) {
+        const indexDelta = hand[5].y - hand[8].y;
+        const middleDelta = hand[12].y - hand[9].y;
+        const ringDelta = hand[16].y - hand[13].y;
+        const pinkyDelta = hand[20].y - hand[17].y;
+
+        const indexExtended = isFingerExtended(hand, 5, 6, 8, thresholdConfig.extendedThreshold);
+        const middleCurled = isFingerCurled(hand, 9, 10, 12, thresholdConfig.curledThreshold);
+        const ringCurled = isFingerCurled(hand, 13, 14, 16, thresholdConfig.curledThreshold);
+        const pinkyCurled = isFingerCurled(hand, 17, 18, 20, thresholdConfig.curledThreshold);
+
+        return {
+          matched: indexExtended && middleCurled && ringCurled && pinkyCurled,
+          indexExtended,
+          middleCurled,
+          ringCurled,
+          pinkyCurled,
+          indexDelta,
+          middleDelta,
+          ringDelta,
+          pinkyDelta,
+        };
+      }
+
+      function drawBoundingBox(hand) {
+        const xs = hand.map((p) => (1 - p.x) * canvas.width);
+        const ys = hand.map((p) => p.y * canvas.height);
+        const minX = Math.min(...xs);
+        const maxX = Math.max(...xs);
+        const minY = Math.min(...ys);
+        const maxY = Math.max(...ys);
+
+        ctx.save();
+        ctx.strokeStyle = "#22c55e";
+        ctx.lineWidth = 2;
+        ctx.strokeRect(minX - 8, minY - 8, maxX - minX + 16, maxY - minY + 16);
+        ctx.restore();
+      }
+
+      function drawDebugPanel(debug) {
+        const panelWidth = 360;
+        const panelHeight = 180;
+
+        ctx.save();
+        ctx.fillStyle = "rgba(0, 0, 0, 0.55)";
+        ctx.fillRect(12, 12, panelWidth, panelHeight);
+        ctx.strokeStyle = "#60a5fa";
+        ctx.lineWidth = 1;
+        ctx.strokeRect(12, 12, panelWidth, panelHeight);
+
+        ctx.fillStyle = "#f8fafc";
+        ctx.font = "16px Arial";
+        ctx.fillText("Gesture Debug (One)", 24, 38);
+
+        ctx.font = "14px Arial";
+        ctx.fillText(`indexExtended: ${debug.indexExtended}`, 24, 64);
+        ctx.fillText(`middleCurled: ${debug.middleCurled}`, 24, 86);
+        ctx.fillText(`ringCurled: ${debug.ringCurled}`, 24, 108);
+        ctx.fillText(`pinkyCurled: ${debug.pinkyCurled}`, 24, 130);
+        ctx.fillText(`delta(index,middle): ${debug.indexDelta.toFixed(3)}, ${debug.middleDelta.toFixed(3)}`, 24, 152);
+        ctx.fillText(`delta(ring,pinky): ${debug.ringDelta.toFixed(3)}, ${debug.pinkyDelta.toFixed(3)}`, 24, 174);
+        ctx.restore();
       }
 
       function drawTopLeftOne() {
@@ -209,11 +312,18 @@
               const results = handLandmarker.detectForVideo(video, performance.now());
               const allHands = results.landmarks || [];
               let hasOneGesture = false;
+              let firstHandDebug = null;
 
               for (const hand of allHands) {
-                if (isGestureOne(hand)) {
+                const debug = getGestureOneDebug(hand, params);
+                if (!firstHandDebug) {
+                  firstHandDebug = debug;
+                }
+                if (debug.matched) {
                   hasOneGesture = true;
                 }
+
+                drawBoundingBox(hand);
 
                 for (const [a, b] of HAND_CONNECTIONS) {
                   const p1 = hand[a];
@@ -233,6 +343,10 @@
 
               if (hasOneGesture) {
                 drawTopLeftOne();
+              }
+
+              if (firstHandDebug) {
+                drawDebugPanel(firstHandDebug);
               }
             }
 

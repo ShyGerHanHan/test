@@ -149,9 +149,9 @@
         <span id="liveCurled" class="metric">0.000</span>
       </div>
       <div class="calibration-panel">
-        <button id="startCalibBtn" type="button">開始A4校正</button>
+        <button id="startCalibBtn" type="button">開始手動A4校正</button>
         <button id="resetCalibBtn" type="button">重設校正</button>
-        <div id="calibrationState">A4校正：尚未完成（請依序點左上、右上、右下、左下）</div>
+        <div id="calibrationState">A4校正：自動偵測牛皮紙袋中（按鈕置中）</div>
         <div id="pressState">按鈕狀態：idle</div>
         <div id="pressMetrics">距離: -- cm | 深度: -- | hold: -- ms</div>
         <div id="pressStats">成功次數: 0 / 嘗試次數: 0</div>
@@ -214,8 +214,11 @@
       };
       let calibrationPoints = [];
       let calibrating = false;
+      let autoDetectBag = true;
       let imageToWallH = null;
       let wallToImageH = null;
+      let detectedBagRect = null;
+      let detectFrameCount = 0;
       let interactionState = "idle";
       let pressStartAt = 0;
       let hoverBaselineZ = null;
@@ -225,6 +228,8 @@
       let successCount = 0;
       let currentMetrics = { distanceCm: null, pressDepth: null, holdMs: 0 };
       const pressLogs = [];
+      const detectCanvas = document.createElement("canvas");
+      const detectCtx = detectCanvas.getContext("2d", { willReadFrequently: true });
 
       function setCalibrationState(text) {
         calibrationStateEl.textContent = `A4校正：${text}`;
@@ -332,6 +337,73 @@
         const W = H[2][0] * x + H[2][1] * y + H[2][2];
         if (Math.abs(W) < 1e-9) return null;
         return { x: X / W, y: Y / W };
+      }
+
+      function detectBrownBagRect() {
+        if (!video.videoWidth || !video.videoHeight) return null;
+        detectCanvas.width = 160;
+        detectCanvas.height = 120;
+        detectCtx.drawImage(video, 0, 0, detectCanvas.width, detectCanvas.height);
+        const { data, width, height } = detectCtx.getImageData(0, 0, detectCanvas.width, detectCanvas.height);
+        let minX = width;
+        let minY = height;
+        let maxX = -1;
+        let maxY = -1;
+        let matched = 0;
+        for (let y = 0; y < height; y += 1) {
+          for (let x = 0; x < width; x += 1) {
+            const i = (y * width + x) * 4;
+            const r = data[i];
+            const g = data[i + 1];
+            const b = data[i + 2];
+            const isBrown = r > 85 && g > 55 && b < 120 && r > (g + 12) && g > (b + 8);
+            if (!isBrown) continue;
+            matched += 1;
+            if (x < minX) minX = x;
+            if (y < minY) minY = y;
+            if (x > maxX) maxX = x;
+            if (y > maxY) maxY = y;
+          }
+        }
+        if (matched < 220 || maxX < minX || maxY < minY) return null;
+        const boxW = maxX - minX + 1;
+        const boxH = maxY - minY + 1;
+        const boxArea = boxW * boxH;
+        const density = matched / boxArea;
+        if (density < 0.12 || boxArea < 900) return null;
+        const sx = canvas.width / width;
+        const sy = canvas.height / height;
+        return {
+          minX: minX * sx,
+          minY: minY * sy,
+          maxX: (maxX + 1) * sx,
+          maxY: (maxY + 1) * sy,
+        };
+      }
+
+      function imageToWallPoint(x, y) {
+        if (autoDetectBag && detectedBagRect) {
+          const width = detectedBagRect.maxX - detectedBagRect.minX;
+          const height = detectedBagRect.maxY - detectedBagRect.minY;
+          if (width < 1 || height < 1) return null;
+          return {
+            x: ((x - detectedBagRect.minX) / width) * A4_WIDTH_CM,
+            y: ((y - detectedBagRect.minY) / height) * A4_HEIGHT_CM,
+          };
+        }
+        return imageToWallH ? projectPoint(imageToWallH, x, y) : null;
+      }
+
+      function wallToImagePoint(x, y) {
+        if (autoDetectBag && detectedBagRect) {
+          const width = detectedBagRect.maxX - detectedBagRect.minX;
+          const height = detectedBagRect.maxY - detectedBagRect.minY;
+          return {
+            x: detectedBagRect.minX + (x / A4_WIDTH_CM) * width,
+            y: detectedBagRect.minY + (y / A4_HEIGHT_CM) * height,
+          };
+        }
+        return wallToImageH ? projectPoint(wallToImageH, x, y) : null;
       }
 
       extendedThresholdInput.addEventListener("input", () => {
@@ -538,9 +610,8 @@
       }
 
       function drawWallButton() {
-        if (!wallToImageH) return;
-        const center = projectPoint(wallToImageH, wallButton.cx, wallButton.cy);
-        const edge = projectPoint(wallToImageH, wallButton.cx + wallButton.radiusCm, wallButton.cy);
+        const center = wallToImagePoint(wallButton.cx, wallButton.cy);
+        const edge = wallToImagePoint(wallButton.cx + wallButton.radiusCm, wallButton.cy);
         if (!center || !edge) return;
         const radiusPx = Math.hypot(edge.x - center.x, edge.y - center.y);
         ctx.save();
@@ -557,6 +628,19 @@
         ctx.textBaseline = "middle";
         ctx.fillText("PUSH", center.x, center.y);
         ctx.restore();
+
+        if (autoDetectBag && detectedBagRect) {
+          ctx.save();
+          ctx.strokeStyle = "#facc15";
+          ctx.lineWidth = 2;
+          ctx.strokeRect(
+            detectedBagRect.minX,
+            detectedBagRect.minY,
+            detectedBagRect.maxX - detectedBagRect.minX,
+            detectedBagRect.maxY - detectedBagRect.minY
+          );
+          ctx.restore();
+        }
       }
 
       function resetPressState() {
@@ -568,11 +652,7 @@
       }
 
       function updatePressDetection(now, tipPoint, tipZ) {
-        if (!imageToWallH) {
-          resetPressState();
-          return;
-        }
-        const wallPoint = projectPoint(imageToWallH, tipPoint.x, tipPoint.y);
+        const wallPoint = imageToWallPoint(tipPoint.x, tipPoint.y);
         if (!wallPoint) {
           resetPressState();
           return;
@@ -627,10 +707,12 @@
       }
 
       startCalibBtn.addEventListener("click", () => {
+        autoDetectBag = false;
         calibrating = true;
         calibrationPoints = [];
         imageToWallH = null;
         wallToImageH = null;
+        detectedBagRect = null;
         setCalibrationState("進行中（請點 4 個角點）");
       });
 
@@ -639,8 +721,10 @@
         calibrationPoints = [];
         imageToWallH = null;
         wallToImageH = null;
+        autoDetectBag = true;
+        detectedBagRect = null;
         resetPressState();
-        setCalibrationState("已重設");
+        setCalibrationState("自動偵測牛皮紙袋中（按鈕置中）");
         updatePressHud();
       });
 
@@ -744,6 +828,16 @@
               const results = handLandmarker.detectForVideo(video, performance.now());
               const allHands = results.landmarks || [];
               const allHandedness = results.handednesses || [];
+              detectFrameCount += 1;
+              if (autoDetectBag && detectFrameCount % 4 === 0) {
+                const found = detectBrownBagRect();
+                if (found) {
+                  detectedBagRect = found;
+                  setCalibrationState("自動鎖定牛皮紙袋");
+                } else if (!detectedBagRect) {
+                  setCalibrationState("自動偵測中（請讓牛皮紙袋完整入鏡）");
+                }
+              }
               let hasOneGesture = false;
               let firstHandDebug = null;
               let chosenTip = null;

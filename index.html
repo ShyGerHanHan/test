@@ -218,6 +218,8 @@
       let imageToWallH = null;
       let wallToImageH = null;
       let detectedBagRect = null;
+      let candidateBagRect = null;
+      let candidateStableCount = 0;
       let detectFrameCount = 0;
       let interactionState = "idle";
       let pressStartAt = 0;
@@ -345,40 +347,112 @@
         detectCanvas.height = 120;
         detectCtx.drawImage(video, 0, 0, detectCanvas.width, detectCanvas.height);
         const { data, width, height } = detectCtx.getImageData(0, 0, detectCanvas.width, detectCanvas.height);
-        let minX = width;
-        let minY = height;
-        let maxX = -1;
-        let maxY = -1;
-        let matched = 0;
+        const mask = new Uint8Array(width * height);
         for (let y = 0; y < height; y += 1) {
           for (let x = 0; x < width; x += 1) {
             const i = (y * width + x) * 4;
             const r = data[i];
             const g = data[i + 1];
             const b = data[i + 2];
-            const isBrown = r > 85 && g > 55 && b < 120 && r > (g + 12) && g > (b + 8);
-            if (!isBrown) continue;
-            matched += 1;
-            if (x < minX) minX = x;
-            if (y < minY) minY = y;
-            if (x > maxX) maxX = x;
-            if (y > maxY) maxY = y;
+            const maxRgb = Math.max(r, g, b);
+            const minRgb = Math.min(r, g, b);
+            const sat = maxRgb === 0 ? 0 : (maxRgb - minRgb) / maxRgb;
+            const isBrown =
+              r > 95 &&
+              g > 60 &&
+              b < 130 &&
+              r > g + 10 &&
+              g > b + 8 &&
+              sat > 0.18;
+            mask[y * width + x] = isBrown ? 1 : 0;
           }
         }
-        if (matched < 220 || maxX < minX || maxY < minY) return null;
-        const boxW = maxX - minX + 1;
-        const boxH = maxY - minY + 1;
-        const boxArea = boxW * boxH;
-        const density = matched / boxArea;
-        if (density < 0.12 || boxArea < 900) return null;
+
+        const visited = new Uint8Array(width * height);
+        let best = null;
+        const qx = new Int16Array(width * height);
+        const qy = new Int16Array(width * height);
+
+        for (let y = 0; y < height; y += 1) {
+          for (let x = 0; x < width; x += 1) {
+            const start = y * width + x;
+            if (!mask[start] || visited[start]) continue;
+
+            let head = 0;
+            let tail = 0;
+            qx[tail] = x;
+            qy[tail] = y;
+            tail += 1;
+            visited[start] = 1;
+
+            let minX = x;
+            let minY = y;
+            let maxX = x;
+            let maxY = y;
+            let count = 0;
+
+            while (head < tail) {
+              const cx = qx[head];
+              const cy = qy[head];
+              head += 1;
+              count += 1;
+              if (cx < minX) minX = cx;
+              if (cy < minY) minY = cy;
+              if (cx > maxX) maxX = cx;
+              if (cy > maxY) maxY = cy;
+
+              const neighbors = [
+                [cx + 1, cy],
+                [cx - 1, cy],
+                [cx, cy + 1],
+                [cx, cy - 1],
+              ];
+              for (const [nx, ny] of neighbors) {
+                if (nx < 0 || ny < 0 || nx >= width || ny >= height) continue;
+                const ni = ny * width + nx;
+                if (!mask[ni] || visited[ni]) continue;
+                visited[ni] = 1;
+                qx[tail] = nx;
+                qy[tail] = ny;
+                tail += 1;
+              }
+            }
+
+            if (count < 120) continue;
+            const boxW = maxX - minX + 1;
+            const boxH = maxY - minY + 1;
+            const boxArea = boxW * boxH;
+            const density = count / boxArea;
+            const areaRatio = boxArea / (width * height);
+            const aspect = boxW / boxH;
+            const aspectScore = 1 - Math.min(Math.abs(aspect - 0.7), 0.7) / 0.7;
+            const densityScore = Math.max(0, Math.min((density - 0.18) / 0.55, 1));
+            const areaScore = areaRatio >= 0.01 && areaRatio <= 0.25 ? 1 : 0;
+            const score = aspectScore * 0.45 + densityScore * 0.35 + areaScore * 0.2;
+            if (!best || score > best.score) {
+              best = { minX, minY, maxX, maxY, score };
+            }
+          }
+        }
+
+        if (!best || best.score < 0.45) return null;
         const sx = canvas.width / width;
         const sy = canvas.height / height;
         return {
-          minX: minX * sx,
-          minY: minY * sy,
-          maxX: (maxX + 1) * sx,
-          maxY: (maxY + 1) * sy,
+          minX: best.minX * sx,
+          minY: best.minY * sy,
+          maxX: (best.maxX + 1) * sx,
+          maxY: (best.maxY + 1) * sy,
         };
+      }
+
+      function rectCenterDistance(a, b) {
+        if (!a || !b) return Infinity;
+        const ax = (a.minX + a.maxX) * 0.5;
+        const ay = (a.minY + a.maxY) * 0.5;
+        const bx = (b.minX + b.maxX) * 0.5;
+        const by = (b.minY + b.maxY) * 0.5;
+        return Math.hypot(ax - bx, ay - by);
       }
 
       function imageToWallPoint(x, y) {
@@ -713,6 +787,8 @@
         imageToWallH = null;
         wallToImageH = null;
         detectedBagRect = null;
+        candidateBagRect = null;
+        candidateStableCount = 0;
         setCalibrationState("進行中（請點 4 個角點）");
       });
 
@@ -723,6 +799,8 @@
         wallToImageH = null;
         autoDetectBag = true;
         detectedBagRect = null;
+        candidateBagRect = null;
+        candidateStableCount = 0;
         resetPressState();
         setCalibrationState("自動偵測牛皮紙袋中（按鈕置中）");
         updatePressHud();
@@ -832,9 +910,23 @@
               if (autoDetectBag && detectFrameCount % 4 === 0) {
                 const found = detectBrownBagRect();
                 if (found) {
-                  detectedBagRect = found;
-                  setCalibrationState("自動鎖定牛皮紙袋");
+                  const closeToCandidate = rectCenterDistance(found, candidateBagRect) < 30;
+                  if (closeToCandidate) {
+                    candidateStableCount += 1;
+                    candidateBagRect = found;
+                  } else {
+                    candidateBagRect = found;
+                    candidateStableCount = 1;
+                  }
+                  if (candidateStableCount >= 3) {
+                    detectedBagRect = candidateBagRect;
+                    setCalibrationState("自動鎖定牛皮紙袋");
+                  } else {
+                    setCalibrationState(`自動偵測中（穩定度 ${candidateStableCount}/3）`);
+                  }
                 } else if (!detectedBagRect) {
+                  candidateBagRect = null;
+                  candidateStableCount = 0;
                   setCalibrationState("自動偵測中（請讓牛皮紙袋完整入鏡）");
                 }
               }

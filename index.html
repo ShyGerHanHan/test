@@ -117,13 +117,13 @@
       <div class="controls">
         <label>
           食指伸直門檻
-          <input id="extendedThreshold" type="range" min="0" max="0.12" step="0.005" value="0.04" />
-          <span id="extendedThresholdValue">0.04</span>
+          <input id="extendedThreshold" type="range" min="0" max="0.12" step="0.005" value="0.02" />
+          <span id="extendedThresholdValue">0.02</span>
         </label>
         <label>
           其他手指彎曲門檻
-          <input id="curledThreshold" type="range" min="0" max="0.12" step="0.005" value="0.015" />
-          <span id="curledThresholdValue">0.015</span>
+          <input id="curledThreshold" type="range" min="0" max="0.12" step="0.005" value="0.02" />
+          <span id="curledThresholdValue">0.02</span>
         </label>
       </div>
       <div id="liveParams" class="live-params">
@@ -157,6 +157,16 @@
         extendedThreshold: Number(extendedThresholdInput.value),
         curledThreshold: Number(curledThresholdInput.value),
       };
+      const GESTURE_ACTIVE_MS = 5000;
+      const HAND_COLOR_THEMES = {
+        Left: { point: "#22c55e", line: "#4ade80", box: "#16a34a" },
+        Right: { point: "#3b82f6", line: "#60a5fa", box: "#2563eb" },
+        Unknown: { point: "#94a3b8", line: "#cbd5e1", box: "#64748b" },
+      };
+      const INDEX_PATH = [0, 5, 6, 7, 8];
+      const INDEX_POINTS = [5, 6, 7, 8];
+      let lastOneMatchedAt = 0;
+      let activeHandIndex = -1;
 
       extendedThresholdInput.addEventListener("input", () => {
         params.extendedThreshold = Number(extendedThresholdInput.value);
@@ -175,7 +185,7 @@
       }
 
       function setGestureState(isMatched) {
-        gestureStateEl.textContent = isMatched ? "手勢1：辨識成功" : "手勢1：未辨識";
+        gestureStateEl.textContent = isMatched ? "手勢1：辨識成功（5秒有效）" : "手勢1：未辨識";
         gestureStateEl.style.color = isMatched ? "#4ade80" : "#facc15";
       }
 
@@ -269,7 +279,11 @@
         };
       }
 
-      function drawBoundingBox(hand) {
+      function getHandTheme(handLabel) {
+        return HAND_COLOR_THEMES[handLabel] || HAND_COLOR_THEMES.Unknown;
+      }
+
+      function drawBoundingBox(hand, color) {
         const xs = hand.map((p) => (1 - p.x) * canvas.width);
         const ys = hand.map((p) => p.y * canvas.height);
         const minX = Math.min(...xs);
@@ -278,10 +292,28 @@
         const maxY = Math.max(...ys);
 
         ctx.save();
-        ctx.strokeStyle = "#22c55e";
+        ctx.strokeStyle = color;
         ctx.lineWidth = 2;
         ctx.strokeRect(minX - 8, minY - 8, maxX - minX + 16, maxY - minY + 16);
         ctx.restore();
+      }
+
+      function drawIndexHighlight(hand) {
+        for (let i = 0; i < INDEX_PATH.length - 1; i += 1) {
+          const a = hand[INDEX_PATH[i]];
+          const b = hand[INDEX_PATH[i + 1]];
+          drawLine(
+            (1 - a.x) * canvas.width,
+            a.y * canvas.height,
+            (1 - b.x) * canvas.width,
+            b.y * canvas.height,
+            "#ef4444"
+          );
+        }
+        for (const idx of INDEX_POINTS) {
+          const p = hand[idx];
+          drawPoint((1 - p.x) * canvas.width, p.y * canvas.height, "#ef4444");
+        }
       }
 
       function drawDebugPanel(debug) {
@@ -377,6 +409,7 @@
           let lastVideoTime = -1;
 
           function render() {
+            const now = performance.now();
             resizeCanvasToVideo();
             ctx.clearRect(0, 0, canvas.width, canvas.height);
 
@@ -384,19 +417,25 @@
               lastVideoTime = video.currentTime;
               const results = handLandmarker.detectForVideo(video, performance.now());
               const allHands = results.landmarks || [];
+              const allHandedness = results.handednesses || [];
               let hasOneGesture = false;
               let firstHandDebug = null;
 
-              for (const hand of allHands) {
+              for (let handIndex = 0; handIndex < allHands.length; handIndex += 1) {
+                const hand = allHands[handIndex];
+                const handedness = allHandedness[handIndex]?.[0]?.categoryName || "Unknown";
+                const theme = getHandTheme(handedness);
                 const debug = getGestureOneDebug(hand, params);
                 if (!firstHandDebug) {
                   firstHandDebug = debug;
                 }
                 if (debug.matched) {
                   hasOneGesture = true;
+                  lastOneMatchedAt = now;
+                  activeHandIndex = handIndex;
                 }
 
-                drawBoundingBox(hand);
+                drawBoundingBox(hand, theme.box);
 
                 for (const [a, b] of HAND_CONNECTIONS) {
                   const p1 = hand[a];
@@ -405,20 +444,23 @@
                     (1 - p1.x) * canvas.width,
                     p1.y * canvas.height,
                     (1 - p2.x) * canvas.width,
-                    p2.y * canvas.height
+                    p2.y * canvas.height,
+                    theme.line
                   );
                 }
 
                 for (const p of hand) {
-                  drawPoint((1 - p.x) * canvas.width, p.y * canvas.height);
+                  drawPoint((1 - p.x) * canvas.width, p.y * canvas.height, theme.point);
+                }
+
+                const isActiveWindow = (now - lastOneMatchedAt) <= GESTURE_ACTIVE_MS;
+                if (isActiveWindow && activeHandIndex === handIndex) {
+                  drawIndexHighlight(hand);
                 }
               }
 
-              if (hasOneGesture) {
-                setGestureState(true);
-              } else {
-                setGestureState(false);
-              }
+              const isOneActive = hasOneGesture || ((now - lastOneMatchedAt) <= GESTURE_ACTIVE_MS);
+              setGestureState(isOneActive);
 
               if (firstHandDebug) {
                 updateLiveParams(firstHandDebug);
@@ -428,7 +470,7 @@
               }
 
               // 最後才畫數字，避免被除錯面板蓋住
-              if (hasOneGesture) {
+              if (isOneActive) {
                 drawTopLeftOne();
               }
             }

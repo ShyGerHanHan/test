@@ -64,6 +64,12 @@
         color: #93c5fd;
       }
 
+      .gesture-state {
+        margin-top: 8px;
+        font-size: 15px;
+        color: #facc15;
+      }
+
       .controls {
         display: flex;
         gap: 16px;
@@ -92,16 +98,17 @@
       <div class="controls">
         <label>
           食指伸直門檻
-          <input id="extendedThreshold" type="range" min="0" max="0.25" step="0.01" value="0.06" />
-          <span id="extendedThresholdValue">0.06</span>
+          <input id="extendedThreshold" type="range" min="0" max="0.12" step="0.005" value="0.04" />
+          <span id="extendedThresholdValue">0.04</span>
         </label>
         <label>
           其他手指彎曲門檻
-          <input id="curledThreshold" type="range" min="0" max="0.25" step="0.01" value="0.02" />
-          <span id="curledThresholdValue">0.02</span>
+          <input id="curledThreshold" type="range" min="0" max="0.12" step="0.005" value="0.015" />
+          <span id="curledThresholdValue">0.015</span>
         </label>
       </div>
       <div id="status" class="status">初始化中...</div>
+      <div id="gestureState" class="gesture-state">手勢1：尚未偵測</div>
     </div>
 
     <script type="module">
@@ -113,6 +120,7 @@
       const video = document.getElementById("video");
       const canvas = document.getElementById("overlay");
       const statusEl = document.getElementById("status");
+      const gestureStateEl = document.getElementById("gestureState");
       const extendedThresholdInput = document.getElementById("extendedThreshold");
       const curledThresholdInput = document.getElementById("curledThreshold");
       const extendedThresholdValue = document.getElementById("extendedThresholdValue");
@@ -136,6 +144,11 @@
 
       function setStatus(text) {
         statusEl.textContent = text;
+      }
+
+      function setGestureState(isMatched) {
+        gestureStateEl.textContent = isMatched ? "手勢1：辨識成功" : "手勢1：未辨識";
+        gestureStateEl.style.color = isMatched ? "#4ade80" : "#facc15";
       }
 
       function resizeCanvasToVideo() {
@@ -171,7 +184,16 @@
         const mcpY = hand[mcp].y;
         const pipY = hand[pip].y;
         const tipY = hand[tip].y;
-        return (tipY - mcpY) > threshold || tipY > pipY || pipY > mcpY;
+        return tipY > (pipY + threshold) || pipY > (mcpY + threshold * 0.5);
+      }
+
+      function isThumbCurled(hand, threshold) {
+        const thumbTip = hand[4];
+        const thumbMcp = hand[2];
+        const indexMcp = hand[5];
+        const thumbToPalm = Math.abs(thumbTip.x - indexMcp.x);
+        const mcpToIndexBase = Math.abs(thumbMcp.x - indexMcp.x) + 1e-6;
+        return thumbToPalm < (mcpToIndexBase + threshold);
       }
 
       function getGestureOneDebug(hand, thresholdConfig) {
@@ -184,13 +206,15 @@
         const middleCurled = isFingerCurled(hand, 9, 10, 12, thresholdConfig.curledThreshold);
         const ringCurled = isFingerCurled(hand, 13, 14, 16, thresholdConfig.curledThreshold);
         const pinkyCurled = isFingerCurled(hand, 17, 18, 20, thresholdConfig.curledThreshold);
+        const thumbCurled = isThumbCurled(hand, thresholdConfig.curledThreshold);
 
         return {
-          matched: indexExtended && middleCurled && ringCurled && pinkyCurled,
+          matched: indexExtended && middleCurled && ringCurled && pinkyCurled && thumbCurled,
           indexExtended,
           middleCurled,
           ringCurled,
           pinkyCurled,
+          thumbCurled,
           indexDelta,
           middleDelta,
           ringDelta,
@@ -215,7 +239,7 @@
 
       function drawDebugPanel(debug) {
         const panelWidth = 360;
-        const panelHeight = 180;
+        const panelHeight = 210;
 
         ctx.save();
         ctx.fillStyle = "rgba(0, 0, 0, 0.55)";
@@ -233,8 +257,9 @@
         ctx.fillText(`middleCurled: ${debug.middleCurled}`, 24, 86);
         ctx.fillText(`ringCurled: ${debug.ringCurled}`, 24, 108);
         ctx.fillText(`pinkyCurled: ${debug.pinkyCurled}`, 24, 130);
-        ctx.fillText(`delta(index,middle): ${debug.indexDelta.toFixed(3)}, ${debug.middleDelta.toFixed(3)}`, 24, 152);
-        ctx.fillText(`delta(ring,pinky): ${debug.ringDelta.toFixed(3)}, ${debug.pinkyDelta.toFixed(3)}`, 24, 174);
+        ctx.fillText(`thumbCurled: ${debug.thumbCurled}`, 24, 152);
+        ctx.fillText(`delta(index,middle): ${debug.indexDelta.toFixed(3)}, ${debug.middleDelta.toFixed(3)}`, 24, 174);
+        ctx.fillText(`delta(ring,pinky): ${debug.ringDelta.toFixed(3)}, ${debug.pinkyDelta.toFixed(3)}`, 24, 196);
         ctx.restore();
       }
 
@@ -342,11 +367,18 @@
               }
 
               if (hasOneGesture) {
-                drawTopLeftOne();
+                setGestureState(true);
+              } else {
+                setGestureState(false);
               }
 
               if (firstHandDebug) {
                 drawDebugPanel(firstHandDebug);
+              }
+
+              // 最後才畫數字，避免被除錯面板蓋住
+              if (hasOneGesture) {
+                drawTopLeftOne();
               }
             }
 

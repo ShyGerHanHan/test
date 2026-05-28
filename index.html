@@ -113,6 +113,37 @@
         ctx.stroke();
       }
 
+      function isFingerExtended(hand, mcp, pip, tip) {
+        const mcpY = hand[mcp].y;
+        const pipY = hand[pip].y;
+        const tipY = hand[tip].y;
+        return tipY < pipY && pipY < mcpY;
+      }
+
+      function isFingerCurled(hand, mcp, pip, tip) {
+        const mcpY = hand[mcp].y;
+        const pipY = hand[pip].y;
+        const tipY = hand[tip].y;
+        return tipY > pipY || pipY > mcpY;
+      }
+
+      function isGestureOne(hand) {
+        const indexExtended = isFingerExtended(hand, 5, 6, 8);
+        const middleCurled = isFingerCurled(hand, 9, 10, 12);
+        const ringCurled = isFingerCurled(hand, 13, 14, 16);
+        const pinkyCurled = isFingerCurled(hand, 17, 18, 20);
+        return indexExtended && middleCurled && ringCurled && pinkyCurled;
+      }
+
+      function drawTopLeftOne() {
+        ctx.save();
+        ctx.font = "bold 96px Arial";
+        ctx.fillStyle = "#facc15";
+        ctx.textBaseline = "top";
+        ctx.fillText("1", 20, 16);
+        ctx.restore();
+      }
+
       // MediaPipe Hands 的連線定義 (21 個點)
       const HAND_CONNECTIONS = [
         [0, 1], [1, 2], [2, 3], [3, 4],
@@ -177,8 +208,13 @@
               lastVideoTime = video.currentTime;
               const results = handLandmarker.detectForVideo(video, performance.now());
               const allHands = results.landmarks || [];
+              let hasOneGesture = false;
 
               for (const hand of allHands) {
+                if (isGestureOne(hand)) {
+                  hasOneGesture = true;
+                }
+
                 for (const [a, b] of HAND_CONNECTIONS) {
                   const p1 = hand[a];
                   const p2 = hand[b];
@@ -193,6 +229,10 @@
                 for (const p of hand) {
                   drawPoint((1 - p.x) * canvas.width, p.y * canvas.height);
                 }
+              }
+
+              if (hasOneGesture) {
+                drawTopLeftOne();
               }
             }
 

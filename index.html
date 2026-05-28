@@ -96,10 +96,13 @@
         font-size: 14px;
       }
 
-      .live-params.success {
-        border-color: #16a34a;
-        color: #86efac;
-        background: rgba(22, 163, 74, 0.15);
+      .metric {
+        color: #fca5a5;
+        font-weight: 600;
+      }
+
+      .metric.pass {
+        color: #4ade80;
       }
     </style>
   </head>
@@ -124,8 +127,8 @@
         </label>
       </div>
       <div id="liveParams" class="live-params">
-        即時參數：食指伸直門檻 <span id="liveExtended">0.040</span>、其他手指彎曲門檻
-        <span id="liveCurled">0.015</span>
+        即時參數：食指伸直值 <span id="liveExtended" class="metric">0.000</span>、其他手指彎曲值
+        <span id="liveCurled" class="metric">0.000</span>
       </div>
       <div id="status" class="status">初始化中...</div>
       <div id="gestureState" class="gesture-state">手勢1：尚未偵測</div>
@@ -158,13 +161,13 @@
       extendedThresholdInput.addEventListener("input", () => {
         params.extendedThreshold = Number(extendedThresholdInput.value);
         extendedThresholdValue.textContent = params.extendedThreshold.toFixed(2);
-        updateLiveParams(false);
+        updateLiveParams(null);
       });
 
       curledThresholdInput.addEventListener("input", () => {
         params.curledThreshold = Number(curledThresholdInput.value);
         curledThresholdValue.textContent = params.curledThreshold.toFixed(2);
-        updateLiveParams(false);
+        updateLiveParams(null);
       });
 
       function setStatus(text) {
@@ -174,13 +177,21 @@
       function setGestureState(isMatched) {
         gestureStateEl.textContent = isMatched ? "手勢1：辨識成功" : "手勢1：未辨識";
         gestureStateEl.style.color = isMatched ? "#4ade80" : "#facc15";
-        updateLiveParams(isMatched);
       }
 
-      function updateLiveParams(isMatched) {
-        liveExtendedEl.textContent = params.extendedThreshold.toFixed(3);
-        liveCurledEl.textContent = params.curledThreshold.toFixed(3);
-        liveParamsEl.classList.toggle("success", isMatched);
+      function updateLiveParams(debug) {
+        if (!debug) {
+          liveExtendedEl.textContent = "0.000";
+          liveCurledEl.textContent = "0.000";
+          liveExtendedEl.classList.remove("pass");
+          liveCurledEl.classList.remove("pass");
+          return;
+        }
+
+        liveExtendedEl.textContent = debug.indexDelta.toFixed(3);
+        liveCurledEl.textContent = debug.otherCurledValue.toFixed(3);
+        liveExtendedEl.classList.toggle("pass", debug.indexExtended);
+        liveCurledEl.classList.toggle("pass", debug.otherCurledPass);
       }
 
       function resizeCanvasToVideo() {
@@ -239,14 +250,18 @@
         const ringCurled = isFingerCurled(hand, 13, 14, 16, thresholdConfig.curledThreshold);
         const pinkyCurled = isFingerCurled(hand, 17, 18, 20, thresholdConfig.curledThreshold);
         const thumbCurled = isThumbCurled(hand, thresholdConfig.curledThreshold);
+        const otherCurledPass = middleCurled && ringCurled && pinkyCurled && thumbCurled;
+        const otherCurledValue = Math.min(middleDelta, ringDelta, pinkyDelta);
 
         return {
-          matched: indexExtended && middleCurled && ringCurled && pinkyCurled && thumbCurled,
+          matched: indexExtended && otherCurledPass,
           indexExtended,
           middleCurled,
           ringCurled,
           pinkyCurled,
           thumbCurled,
+          otherCurledPass,
+          otherCurledValue,
           indexDelta,
           middleDelta,
           ringDelta,
@@ -352,7 +367,7 @@
         }
 
         try {
-          updateLiveParams(false);
+          updateLiveParams(null);
           setStatus("開啟攝影機中...");
           await initCamera();
           setStatus("載入手部模型中...");
@@ -406,7 +421,10 @@
               }
 
               if (firstHandDebug) {
+                updateLiveParams(firstHandDebug);
                 drawDebugPanel(firstHandDebug);
+              } else {
+                updateLiveParams(null);
               }
 
               // 最後才畫數字，避免被除錯面板蓋住

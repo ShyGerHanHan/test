@@ -55,7 +55,7 @@
       }
 
       canvas {
-        pointer-events: none;
+        pointer-events: auto;
       }
 
       .status {
@@ -104,6 +104,24 @@
       .metric.pass {
         color: #4ade80;
       }
+
+      .calibration-panel {
+        margin-top: 10px;
+        padding: 10px 12px;
+        border: 1px solid #334155;
+        border-radius: 8px;
+        background: rgba(15, 23, 42, 0.7);
+        font-size: 14px;
+      }
+
+      .calibration-panel button {
+        margin-right: 8px;
+      }
+
+      .log-list {
+        margin: 8px 0 0;
+        padding-left: 18px;
+      }
     </style>
   </head>
   <body>
@@ -130,6 +148,15 @@
         即時參數：食指伸直值 <span id="liveExtended" class="metric">0.000</span>、其他手指彎曲值
         <span id="liveCurled" class="metric">0.000</span>
       </div>
+      <div class="calibration-panel">
+        <button id="startCalibBtn" type="button">開始A4校正</button>
+        <button id="resetCalibBtn" type="button">重設校正</button>
+        <div id="calibrationState">A4校正：尚未完成（請依序點左上、右上、右下、左下）</div>
+        <div id="pressState">按鈕狀態：idle</div>
+        <div id="pressMetrics">距離: -- cm | 深度: -- | hold: -- ms</div>
+        <div id="pressStats">成功次數: 0 / 嘗試次數: 0</div>
+        <ol id="pressLogs" class="log-list"></ol>
+      </div>
       <div id="status" class="status">初始化中...</div>
       <div id="gestureState" class="gesture-state">手勢1：尚未偵測</div>
     </div>
@@ -151,6 +178,13 @@
       const liveParamsEl = document.getElementById("liveParams");
       const liveExtendedEl = document.getElementById("liveExtended");
       const liveCurledEl = document.getElementById("liveCurled");
+      const startCalibBtn = document.getElementById("startCalibBtn");
+      const resetCalibBtn = document.getElementById("resetCalibBtn");
+      const calibrationStateEl = document.getElementById("calibrationState");
+      const pressStateEl = document.getElementById("pressState");
+      const pressMetricsEl = document.getElementById("pressMetrics");
+      const pressStatsEl = document.getElementById("pressStats");
+      const pressLogsEl = document.getElementById("pressLogs");
       const ctx = canvas.getContext("2d");
 
       const params = {
@@ -167,6 +201,137 @@
       const INDEX_POINTS = [5, 6, 7, 8];
       let lastOneMatchedAt = 0;
       let activeHandIndex = -1;
+      const A4_WIDTH_CM = 21.0;
+      const A4_HEIGHT_CM = 29.7;
+      const wallButton = { cx: 10.5, cy: 14.85, radiusCm: 2.5 };
+      const pressConfig = {
+        hoverToleranceCm: 1.0,
+        pressDepthThreshold: 0.03,
+        minHoldMs: 100,
+        releaseDepthThreshold: 0.015,
+        debounceMs: 250,
+      };
+      let calibrationPoints = [];
+      let calibrating = false;
+      let imageToWallH = null;
+      let wallToImageH = null;
+      let interactionState = "idle";
+      let pressStartAt = 0;
+      let hoverBaselineZ = null;
+      let lastPressAt = -Infinity;
+      let prevInsideButton = false;
+      let attempts = 0;
+      let successCount = 0;
+      let currentMetrics = { distanceCm: null, pressDepth: null, holdMs: 0 };
+      const pressLogs = [];
+
+      function setCalibrationState(text) {
+        calibrationStateEl.textContent = `A4校正：${text}`;
+      }
+
+      function updatePressHud() {
+        pressStateEl.textContent = `按鈕狀態：${interactionState}`;
+        const distText = currentMetrics.distanceCm == null ? "--" : currentMetrics.distanceCm.toFixed(2);
+        const depthText = currentMetrics.pressDepth == null ? "--" : currentMetrics.pressDepth.toFixed(4);
+        const holdText = currentMetrics.holdMs == null ? "--" : Math.round(currentMetrics.holdMs);
+        pressMetricsEl.textContent = `距離: ${distText} cm | 深度: ${depthText} | hold: ${holdText} ms`;
+        pressStatsEl.textContent = `成功次數: ${successCount} / 嘗試次數: ${attempts}`;
+      }
+
+      function refreshPressLogs() {
+        pressLogsEl.innerHTML = "";
+        for (const item of pressLogs) {
+          const li = document.createElement("li");
+          li.textContent = item;
+          pressLogsEl.appendChild(li);
+        }
+      }
+
+      function pushPressLog(msg) {
+        const stamp = new Date().toLocaleTimeString();
+        pressLogs.unshift(`${stamp} ${msg}`);
+        if (pressLogs.length > 6) {
+          pressLogs.pop();
+        }
+        refreshPressLogs();
+      }
+
+      function solveLinearSystem(A, b) {
+        const n = A.length;
+        const M = A.map((row, i) => [...row, b[i]]);
+        for (let col = 0; col < n; col += 1) {
+          let pivot = col;
+          for (let r = col + 1; r < n; r += 1) {
+            if (Math.abs(M[r][col]) > Math.abs(M[pivot][col])) {
+              pivot = r;
+            }
+          }
+          if (Math.abs(M[pivot][col]) < 1e-9) return null;
+          [M[col], M[pivot]] = [M[pivot], M[col]];
+          const div = M[col][col];
+          for (let c = col; c <= n; c += 1) {
+            M[col][c] /= div;
+          }
+          for (let r = 0; r < n; r += 1) {
+            if (r === col) continue;
+            const factor = M[r][col];
+            for (let c = col; c <= n; c += 1) {
+              M[r][c] -= factor * M[col][c];
+            }
+          }
+        }
+        return M.map((row) => row[n]);
+      }
+
+      function computeHomography(srcPts, dstPts) {
+        const A = [];
+        const b = [];
+        for (let i = 0; i < 4; i += 1) {
+          const { x, y } = srcPts[i];
+          const { x: u, y: v } = dstPts[i];
+          A.push([x, y, 1, 0, 0, 0, -u * x, -u * y]);
+          b.push(u);
+          A.push([0, 0, 0, x, y, 1, -v * x, -v * y]);
+          b.push(v);
+        }
+        const h = solveLinearSystem(A, b);
+        if (!h) return null;
+        return [
+          [h[0], h[1], h[2]],
+          [h[3], h[4], h[5]],
+          [h[6], h[7], 1],
+        ];
+      }
+
+      function invert3x3(m) {
+        const a = m[0][0], b = m[0][1], c = m[0][2];
+        const d = m[1][0], e = m[1][1], f = m[1][2];
+        const g = m[2][0], h = m[2][1], i = m[2][2];
+        const A = e * i - f * h;
+        const B = -(d * i - f * g);
+        const C = d * h - e * g;
+        const D = -(b * i - c * h);
+        const E = a * i - c * g;
+        const F = -(a * h - b * g);
+        const G = b * f - c * e;
+        const H = -(a * f - c * d);
+        const I = a * e - b * d;
+        const det = a * A + b * B + c * C;
+        if (Math.abs(det) < 1e-9) return null;
+        return [
+          [A / det, D / det, G / det],
+          [B / det, E / det, H / det],
+          [C / det, F / det, I / det],
+        ];
+      }
+
+      function projectPoint(H, x, y) {
+        const X = H[0][0] * x + H[0][1] * y + H[0][2];
+        const Y = H[1][0] * x + H[1][1] * y + H[1][2];
+        const W = H[2][0] * x + H[2][1] * y + H[2][2];
+        if (Math.abs(W) < 1e-9) return null;
+        return { x: X / W, y: Y / W };
+      }
 
       extendedThresholdInput.addEventListener("input", () => {
         params.extendedThreshold = Number(extendedThresholdInput.value);
@@ -351,6 +516,160 @@
         ctx.restore();
       }
 
+      function drawCalibrationOverlay() {
+        if (!calibrating) return;
+        ctx.save();
+        ctx.fillStyle = "rgba(15,23,42,0.35)";
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.fillStyle = "#fde047";
+        ctx.font = "18px Arial";
+        ctx.fillText(`校正點 ${calibrationPoints.length}/4：請依序點 A4 四角`, 20, canvas.height - 20);
+        calibrationPoints.forEach((p, idx) => {
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, 6, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.fillText(String(idx + 1), p.x + 10, p.y - 10);
+        });
+        ctx.restore();
+      }
+
+      function drawWallButton() {
+        if (!wallToImageH) return;
+        const center = projectPoint(wallToImageH, wallButton.cx, wallButton.cy);
+        const edge = projectPoint(wallToImageH, wallButton.cx + wallButton.radiusCm, wallButton.cy);
+        if (!center || !edge) return;
+        const radiusPx = Math.hypot(edge.x - center.x, edge.y - center.y);
+        ctx.save();
+        ctx.beginPath();
+        ctx.arc(center.x, center.y, radiusPx, 0, Math.PI * 2);
+        ctx.fillStyle = interactionState === "pressed" ? "rgba(16,185,129,0.4)" : "rgba(59,130,246,0.35)";
+        ctx.fill();
+        ctx.lineWidth = 3;
+        ctx.strokeStyle = "#e2e8f0";
+        ctx.stroke();
+        ctx.fillStyle = "#f8fafc";
+        ctx.font = "bold 18px Arial";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillText("PUSH", center.x, center.y);
+        ctx.restore();
+      }
+
+      function resetPressState() {
+        interactionState = "idle";
+        pressStartAt = 0;
+        hoverBaselineZ = null;
+        prevInsideButton = false;
+        currentMetrics = { distanceCm: null, pressDepth: null, holdMs: 0 };
+      }
+
+      function updatePressDetection(now, tipPoint, tipZ) {
+        if (!imageToWallH) {
+          resetPressState();
+          return;
+        }
+        const wallPoint = projectPoint(imageToWallH, tipPoint.x, tipPoint.y);
+        if (!wallPoint) {
+          resetPressState();
+          return;
+        }
+        const distanceCm = Math.hypot(wallPoint.x - wallButton.cx, wallPoint.y - wallButton.cy);
+        const insideButton = distanceCm <= (wallButton.radiusCm + pressConfig.hoverToleranceCm);
+        if (insideButton && !prevInsideButton) {
+          attempts += 1;
+          hoverBaselineZ = tipZ;
+        }
+        prevInsideButton = insideButton;
+
+        const pressDepth = hoverBaselineZ == null ? 0 : (tipZ - hoverBaselineZ);
+        currentMetrics.distanceCm = distanceCm;
+        currentMetrics.pressDepth = pressDepth;
+
+        if (now - lastPressAt < pressConfig.debounceMs) {
+          interactionState = "released";
+          currentMetrics.holdMs = 0;
+          return;
+        }
+
+        if (!insideButton) {
+          interactionState = "idle";
+          pressStartAt = 0;
+          hoverBaselineZ = null;
+          currentMetrics.holdMs = 0;
+          return;
+        }
+
+        if (pressDepth > pressConfig.pressDepthThreshold) {
+          if (!pressStartAt) pressStartAt = now;
+          currentMetrics.holdMs = now - pressStartAt;
+          interactionState = "pressing";
+          if (currentMetrics.holdMs >= pressConfig.minHoldMs) {
+            interactionState = "pressed";
+            lastPressAt = now;
+            successCount += 1;
+            pushPressLog(`pressed dist=${distanceCm.toFixed(2)}cm depth=${pressDepth.toFixed(4)} hold=${Math.round(currentMetrics.holdMs)}ms`);
+            pressStartAt = 0;
+          }
+          return;
+        }
+
+        currentMetrics.holdMs = 0;
+        pressStartAt = 0;
+        if (pressDepth < pressConfig.releaseDepthThreshold) {
+          interactionState = "hover";
+        } else {
+          interactionState = "released";
+        }
+      }
+
+      startCalibBtn.addEventListener("click", () => {
+        calibrating = true;
+        calibrationPoints = [];
+        imageToWallH = null;
+        wallToImageH = null;
+        setCalibrationState("進行中（請點 4 個角點）");
+      });
+
+      resetCalibBtn.addEventListener("click", () => {
+        calibrating = false;
+        calibrationPoints = [];
+        imageToWallH = null;
+        wallToImageH = null;
+        resetPressState();
+        setCalibrationState("已重設");
+        updatePressHud();
+      });
+
+      canvas.addEventListener("click", (ev) => {
+        if (!calibrating) return;
+        const rect = canvas.getBoundingClientRect();
+        const sx = canvas.width / rect.width;
+        const sy = canvas.height / rect.height;
+        calibrationPoints.push({
+          x: (ev.clientX - rect.left) * sx,
+          y: (ev.clientY - rect.top) * sy,
+        });
+        if (calibrationPoints.length < 4) {
+          setCalibrationState(`進行中（已點 ${calibrationPoints.length}/4）`);
+          return;
+        }
+        const wallPts = [
+          { x: 0, y: 0 },
+          { x: A4_WIDTH_CM, y: 0 },
+          { x: A4_WIDTH_CM, y: A4_HEIGHT_CM },
+          { x: 0, y: A4_HEIGHT_CM },
+        ];
+        imageToWallH = computeHomography(calibrationPoints, wallPts);
+        wallToImageH = imageToWallH ? invert3x3(imageToWallH) : null;
+        calibrating = false;
+        calibrationPoints = [];
+        if (imageToWallH && wallToImageH) {
+          setCalibrationState("完成");
+        } else {
+          setCalibrationState("失敗（請重試）");
+        }
+      });
+
       // MediaPipe Hands 的連線定義 (21 個點)
       const HAND_CONNECTIONS = [
         [0, 1], [1, 2], [2, 3], [3, 4],
@@ -420,6 +739,7 @@
               const allHandedness = results.handednesses || [];
               let hasOneGesture = false;
               let firstHandDebug = null;
+              let chosenTip = null;
 
               for (let handIndex = 0; handIndex < allHands.length; handIndex += 1) {
                 const hand = allHands[handIndex];
@@ -428,6 +748,13 @@
                 const debug = getGestureOneDebug(hand, params);
                 if (!firstHandDebug) {
                   firstHandDebug = debug;
+                }
+                if (!chosenTip) {
+                  chosenTip = {
+                    x: (1 - hand[8].x) * canvas.width,
+                    y: hand[8].y * canvas.height,
+                    z: hand[8].z,
+                  };
                 }
                 if (debug.matched) {
                   hasOneGesture = true;
@@ -469,10 +796,20 @@
                 updateLiveParams(null);
               }
 
+              if (chosenTip) {
+                updatePressDetection(now, chosenTip, chosenTip.z);
+              } else {
+                resetPressState();
+              }
+
               // 最後才畫數字，避免被除錯面板蓋住
               if (isOneActive) {
                 drawTopLeftOne();
               }
+
+              drawWallButton();
+              drawCalibrationOverlay();
+              updatePressHud();
             }
 
             requestAnimationFrame(render);

@@ -168,6 +168,7 @@
       } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14";
 
       const video = document.getElementById("video");
+      const stageEl = document.querySelector(".stage");
       const canvas = document.getElementById("overlay");
       const statusEl = document.getElementById("status");
       const gestureStateEl = document.getElementById("gestureState");
@@ -373,6 +374,9 @@
         if (!video.videoWidth || !video.videoHeight) return;
         canvas.width = video.videoWidth;
         canvas.height = video.videoHeight;
+        // Keep the rendered stage ratio aligned with the real camera ratio
+        // so touch/click coordinates don't drift on mobile (e.g. 3:4 streams).
+        stageEl.style.aspectRatio = `${video.videoWidth} / ${video.videoHeight}`;
       }
 
       function drawPoint(x, y, color = "#22d3ee") {
@@ -640,8 +644,9 @@
         updatePressHud();
       });
 
-      canvas.addEventListener("click", (ev) => {
+      function handleCalibrationPointer(ev) {
         if (!calibrating) return;
+        ev.preventDefault();
         const rect = canvas.getBoundingClientRect();
         const sx = canvas.width / rect.width;
         const sy = canvas.height / rect.height;
@@ -668,7 +673,9 @@
         } else {
           setCalibrationState("失敗（請重試）");
         }
-      });
+      }
+
+      canvas.addEventListener("pointerdown", handleCalibrationPointer);
 
       // MediaPipe Hands 的連線定義 (21 個點)
       const HAND_CONNECTIONS = [

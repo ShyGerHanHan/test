@@ -204,13 +204,14 @@
       let activeHandIndex = -1;
       const A4_WIDTH_CM = 21.0;
       const A4_HEIGHT_CM = 29.7;
-      const wallButton = { cx: 10.5, cy: 14.85, radiusCm: 2.5 };
+      const wallButton = { cx: 10.5, cy: 14.85, radiusCm: 10.0 };
       const pressConfig = {
         hoverToleranceCm: 1.0,
-        pressDepthThreshold: 0.03,
+        pressDepthThreshold: 0.02,
         minHoldMs: 100,
-        releaseDepthThreshold: 0.015,
+        releaseDepthThreshold: 0.01,
         debounceMs: 250,
+        verticalWeight: 0.7,
       };
       let calibrationPoints = [];
       let calibrating = false;
@@ -221,9 +222,11 @@
       let candidateBagRect = null;
       let candidateStableCount = 0;
       let detectFrameCount = 0;
+      let bagLockUntilMs = 0;
       let interactionState = "idle";
       let pressStartAt = 0;
       let hoverBaselineZ = null;
+      let hoverBaselineY = null;
       let lastPressAt = -Infinity;
       let prevInsideButton = false;
       let attempts = 0;
@@ -341,7 +344,7 @@
         return { x: X / W, y: Y / W };
       }
 
-      function detectBrownBagRect() {
+      function detectYellowBagRect() {
         if (!video.videoWidth || !video.videoHeight) return null;
         detectCanvas.width = 160;
         detectCanvas.height = 120;
@@ -357,14 +360,14 @@
             const maxRgb = Math.max(r, g, b);
             const minRgb = Math.min(r, g, b);
             const sat = maxRgb === 0 ? 0 : (maxRgb - minRgb) / maxRgb;
-            const isBrown =
-              r > 95 &&
-              g > 60 &&
-              b < 130 &&
-              r > g + 10 &&
-              g > b + 8 &&
+            const isYellow =
+              r > 120 &&
+              g > 105 &&
+              b < 135 &&
+              r > b + 20 &&
+              g > b + 16 &&
               sat > 0.18;
-            mask[y * width + x] = isBrown ? 1 : 0;
+            mask[y * width + x] = isYellow ? 1 : 0;
           }
         }
 
@@ -721,6 +724,7 @@
         interactionState = "idle";
         pressStartAt = 0;
         hoverBaselineZ = null;
+        hoverBaselineY = null;
         prevInsideButton = false;
         currentMetrics = { distanceCm: null, pressDepth: null, holdMs: 0 };
       }
@@ -736,10 +740,13 @@
         if (insideButton && !prevInsideButton) {
           attempts += 1;
           hoverBaselineZ = tipZ;
+          hoverBaselineY = tipPoint.y;
         }
         prevInsideButton = insideButton;
 
-        const pressDepth = hoverBaselineZ == null ? 0 : (tipZ - hoverBaselineZ);
+        const zPush = hoverBaselineZ == null ? 0 : (tipZ - hoverBaselineZ);
+        const yPush = hoverBaselineY == null ? 0 : (hoverBaselineY - tipPoint.y);
+        const pressDepth = zPush + (yPush * pressConfig.verticalWeight / Math.max(canvas.height, 1));
         currentMetrics.distanceCm = distanceCm;
         currentMetrics.pressDepth = pressDepth;
 
@@ -753,6 +760,7 @@
           interactionState = "idle";
           pressStartAt = 0;
           hoverBaselineZ = null;
+          hoverBaselineY = null;
           currentMetrics.holdMs = 0;
           return;
         }
@@ -789,6 +797,7 @@
         detectedBagRect = null;
         candidateBagRect = null;
         candidateStableCount = 0;
+        bagLockUntilMs = 0;
         setCalibrationState("進行中（請點 4 個角點）");
       });
 
@@ -801,6 +810,7 @@
         detectedBagRect = null;
         candidateBagRect = null;
         candidateStableCount = 0;
+        bagLockUntilMs = 0;
         resetPressState();
         setCalibrationState("自動偵測牛皮紙袋中（按鈕置中）");
         updatePressHud();
@@ -907,8 +917,8 @@
               const allHands = results.landmarks || [];
               const allHandedness = results.handednesses || [];
               detectFrameCount += 1;
-              if (autoDetectBag && detectFrameCount % 4 === 0) {
-                const found = detectBrownBagRect();
+              if (autoDetectBag && now >= bagLockUntilMs && detectFrameCount % 4 === 0) {
+                const found = detectYellowBagRect();
                 if (found) {
                   const closeToCandidate = rectCenterDistance(found, candidateBagRect) < 30;
                   if (closeToCandidate) {
@@ -920,6 +930,7 @@
                   }
                   if (candidateStableCount >= 3) {
                     detectedBagRect = candidateBagRect;
+                    bagLockUntilMs = now + 10000;
                     setCalibrationState("自動鎖定牛皮紙袋");
                   } else {
                     setCalibrationState(`自動偵測中（穩定度 ${candidateStableCount}/3）`);
@@ -929,6 +940,9 @@
                   candidateStableCount = 0;
                   setCalibrationState("自動偵測中（請讓牛皮紙袋完整入鏡）");
                 }
+              } else if (autoDetectBag && detectedBagRect && now < bagLockUntilMs) {
+                const remain = Math.ceil((bagLockUntilMs - now) / 1000);
+                setCalibrationState(`自動鎖定牛皮紙袋（${remain}s）`);
               }
               let hasOneGesture = false;
               let firstHandDebug = null;
